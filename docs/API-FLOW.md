@@ -44,6 +44,17 @@ to a workflow in Track & Trace, so **which channel you post to decides what the 
 
 (In the T&T UI the store reader is shown as "ST00199 Collector-NAME"; its id is `ST00199_Collector`.)
 
+## The operator's view
+
+For the people on the floor each leg is just: **scan → check → confirm.**
+
+| Operator action | API calls behind it |
+|---|---|
+| Confirm packing | reads (once, confirmed set) → close pack order |
+| Confirm shipment | reads (once) → close ship order → **create receiving ASN automatically** |
+| Confirm receipt | reads (once) → compare → close ASN |
+| Push through tunnel | one read on `MOVE_EmptyPool` |
+
 ## Core concepts
 
 - **Ship orders and ASNs follow the same four calls:**
@@ -200,7 +211,12 @@ Response `204`.
 
 ## 3. Store receiving (ASN)
 
-As soon as the DC shipment is closed, create the ASN at the store with the same EPCs.
+**Confirming a shipment and creating the receiving ASN are one step.** Once the shipment is confirmed
+(the ship order is closed), the ASN for the destination is created automatically with the same EPCs. The operator
+never creates it by hand; the next thing they do is receive. The demo shows it as its own card so you can see
+the call, but it fires by itself when the shipment is confirmed. The same applies to the return leg (section 5 → 6).
+
+The call that creates it:
 
 ```bash
 curl --request PUT --url https://api.bartender-tt.com/logistics/asn \

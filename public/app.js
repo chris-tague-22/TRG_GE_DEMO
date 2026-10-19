@@ -104,7 +104,7 @@ const STEPS = [
     createExplain:
       'An Advanced Shipping Notice tells the store what is on its way: the same EPCs that were shipped. ' +
       'destination is the receiving site (the ASN appears in its Receiving workflow), source the site it ships from. ' +
-      'The response is the new asnId.',
+      'The response is the new asnId. Runs by itself when step 8 confirms the shipment.',
     auto: true,
     readTitle: 'Receive totes onto the sales floor',
     readExplain:
@@ -151,7 +151,7 @@ const STEPS = [
     what: 'DC ASN',
     from: () => settings.store,
     to: () => settings.dc,
-    createExplain: 'ASN at the DC for the returning totes, so the DC receiving dock knows what to expect.',
+    createExplain: 'ASN at the DC for the returning totes, so the DC receiving dock knows what to expect. Runs by itself when the return shipment is confirmed.',
     auto: true,
     readTitle: 'Receive totes at the DC',
     collector: () => settings.dcCollectorId,
@@ -170,10 +170,18 @@ const ID_FIELD = { shiporder: 'soId', asn: 'asnId' };
 // The four calls every ship order / ASN goes through.
 function orderLeg(leg, o) {
   return [
-    createStep(leg, { ...o, title: `Create ${o.what} (EPC level)`, explain: o.createExplain, contentFormat: 'tag', containers: () => tagContainers(run.epcs) }),
+    createStep(leg, { ...o, title: o.auto ? `${o.what} — created automatically when the shipment is confirmed` : `Create ${o.what} (EPC level)`, explain: o.createExplain, contentFormat: 'tag', containers: () => tagContainers(run.epcs) }),
     readStep(leg, { title: o.readTitle, explain: o.readExplain || `Tag reads with this ${o.what}'s transactionId. Use the buttons to simulate a short or wrong load: they only change the local list, and the next step previews the result. Once you click Run the reads are permanent — tags cannot be removed from an order — so settle the count before sending.`, collector: o.collector, channel: o.channel, extra: 'sim', simFrom: o.simFrom }),
     compareStep(leg, o),
-    closeStep(leg, { ...o, title: `Close the ${o.what}`, explain: `Status "done", resending the contents (the PUT replaces the record).${o.thenAuto ? ' With auto-create on, this also creates the receiving ASN.' : ''}` }),
+    closeStep(leg, {
+      ...o,
+      title: o.thenAuto ? 'Confirm shipment → receiving ASN is created' : `Confirm receipt: close the ${o.what}`,
+      explain: o.thenAuto
+        ? 'One action for the operator: close the shipping order (status "done", resending the contents — the PUT replaces the record) ' +
+          'and the receiving ASN for the destination is created straight after, with the same EPCs. ' +
+          'The next card shows that second call; there is nothing to press.'
+        : 'Status "done", resending the contents (the PUT replaces the record). Receiving is complete.',
+    }),
   ];
 }
 
@@ -443,7 +451,7 @@ function renderExtra(step, el) {
   if (step.extra === 'auto') {
     if (!el.dataset.built) {
       el.dataset.built = 1;
-      el.innerHTML = `<label class="check"><input type="checkbox" class="auto"> Create receiving ASNs automatically when the shipping order is closed</label>`;
+      el.innerHTML = `<label class="check"><input type="checkbox" class="auto"> Create the receiving ASN automatically when the shipment is confirmed (untick to run it by hand)</label>`;
       el.querySelector('.auto').addEventListener('change', (e) => { settings.autoAsn = e.target.checked; save('settings', settings); });
     }
     el.querySelector('.auto').checked = !!settings.autoAsn;
