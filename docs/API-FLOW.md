@@ -61,6 +61,38 @@ to a workflow in Track & Trace, so **which channel you post to decides what the 
   Ship orders and ASNs share one id space: `GET /logistics/asn/{shipOrderId}` returns the ship order seen as an ASN —
   that is not a real ASN. Create the ASN explicitly.
 
+## Design rule: settle the count locally, then send once
+
+**Tag reads cannot be taken back.** Once a read is posted to `/datacollector/reads` against a `transactionId`,
+it counts towards that order or ASN for good. There is no call to remove a tag or reset an order's reads,
+and deleting the order does not delete the read events. So the client app must have the final, confirmed set
+of EPCs **before** it sends anything.
+
+Recommended pattern for every ship order and ASN:
+
+1. **Create** the ship order / ASN (or receive it from the WMS).
+2. **Pull the expected EPCs down**: `GET /logistics/{shiporder|asn}/{id}` → `containers[].content[].hexa`.
+3. **Read locally.** Buffer the reader's tags in the app, de-duplicate them, and diff them live against the
+   expected list: matching / missing / unexpected, with a red/green light. Nothing goes to the API yet.
+4. **Let the operator fix it.** Put a tote in, take one out, re-scan. The local diff updates each time.
+   This is where a tote added and then removed must disappear from the set. That can only happen locally.
+5. **Confirm.** Overs and unders can be legitimate (a short shipment, an extra tote). The operator accepts
+   the final set explicitly, ideally with a reason when it is not a clean match.
+6. **Send once**: one `POST /datacollector/reads` with the confirmed set and the order's `transactionId`.
+7. **Verify** with `GET …/compare/{id}`. It should show exactly what the app showed locally. Then **close** the order.
+
+Do not stream raw reader events straight to the API. A tote that passes the antenna by mistake becomes a
+permanent "notExpected" on the order.
+
+The empty-pool move is the one exception: it has no order to reconcile against, so the read is sent as soon as
+the totes go through the tunnel. Still de-duplicate first.
+
+If a send fails ambiguously (timeout, 5xx), run compare before resending, to see what actually landed.
+The gateway's `401 not_owned` is the exception: it is rejected before processing, so it is safe to resend.
+
+The demo app follows this: the read-step buttons ("Drop one tote", "Add a stray tote") change a local list,
+and the next step's lights preview the result **before** anything is sent. Once you click Run, the reads are permanent.
+
 ## 1. DC packing
 
 ### 1a. Create the packing order (SKU level)
@@ -256,7 +288,8 @@ function sgtin96(gtin14, prefixLen, serial, filter = 0) {
 
 - Create returns a bare-number id; use it (not the `soId`/`asnId` you sent) for everything after.
 - Update is a full replace — resend `containers` or the contents are wiped.
-- Reads add up per `transactionId`; once a tag is read against an order it stays read.
+- **Reads are permanent.** Tags posted against a `transactionId` cannot be removed, and the order cannot be reset.
+  Settle overs/unders locally and send the confirmed set once (see "Design rule" above).
 - Compare can 404 for a few seconds after reads; empty lists come back as `{}`.
 - **Intermittent `401 {"error":"not_owned","message":"unauthorized"}` with a valid key** — about 1 in 3 calls at times.
   It is rejected in ~2 ms before reaching the service, so the call was not processed and is safe to retry

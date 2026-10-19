@@ -171,7 +171,7 @@ const ID_FIELD = { shiporder: 'soId', asn: 'asnId' };
 function orderLeg(leg, o) {
   return [
     createStep(leg, { ...o, title: `Create ${o.what} (EPC level)`, explain: o.createExplain, contentFormat: 'tag', containers: () => tagContainers(run.epcs) }),
-    readStep(leg, { title: o.readTitle, explain: o.readExplain || `Tag reads with this ${o.what}'s transactionId. Use the buttons to simulate a short or wrong load and watch the next check go red. Reads add up — start a new run for a clean load.`, collector: o.collector, channel: o.channel, extra: 'sim', simFrom: o.simFrom }),
+    readStep(leg, { title: o.readTitle, explain: o.readExplain || `Tag reads with this ${o.what}'s transactionId. Use the buttons to simulate a short or wrong load: they only change the local list, and the next step previews the result. Once you click Run the reads are permanent — tags cannot be removed from an order — so settle the count before sending.`, collector: o.collector, channel: o.channel, extra: 'sim', simFrom: o.simFrom }),
     compareStep(leg, o),
     closeStep(leg, { ...o, title: `Close the ${o.what}`, explain: `Status "done", resending the contents (the PUT replaces the record).${o.thenAuto ? ' With auto-create on, this also creates the receiving ASN.' : ''}` }),
   ];
