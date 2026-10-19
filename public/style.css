@@ -1,0 +1,54 @@
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #5b6573; --border: #dde1e6;
+  --accent: #2f6fde; --accent-text: #ffffff; --code-bg: #f0f2f5;
+  --ok: #1d8a4a; --ok-bg: #e3f5ea; --bad: #c4372f; --bad-bg: #fbe6e4; --warn-bg: #fff4dc;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418; --card: #1a1e24; --text: #e6e9ed; --muted: #9aa4b1; --border: #2c323a;
+    --accent: #5b8ff0; --accent-text: #0d1117; --code-bg: #0f1216;
+    --ok: #4cc382; --ok-bg: #12301f; --bad: #f07a71; --bad-bg: #3a1714; --warn-bg: #3a2f12;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+code { font-family: var(--mono); font-size: 0.9em; }
+.top { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; align-items: flex-end; padding: 24px 16px 8px; max-width: 980px; margin: 0 auto; }
+.top h1 { margin: 0; font-size: 1.5rem; }
+.sub { margin: 4px 0 0; color: var(--muted); max-width: 560px; }
+.top-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+main { max-width: 980px; margin: 0 auto; padding: 8px 16px 32px; display: flex; flex-direction: column; gap: 16px; }
+#steps { display: flex; flex-direction: column; gap: 16px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+.card.disabled { opacity: 0.6; }
+.card h2 { margin: 0 0 4px; font-size: 1.1rem; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.phase { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 8px 0 -6px 4px; }
+.num { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: var(--accent-text); font-size: 0.85rem; }
+.tag { font-size: 0.75rem; font-weight: 500; padding: 1px 8px; border-radius: 999px; background: var(--code-bg); color: var(--muted); }
+.endpoint { font-family: var(--mono); font-size: 0.85rem; background: var(--code-bg); padding: 4px 8px; border-radius: 6px; display: inline-block; margin: 6px 0; word-break: break-all; }
+.method { font-weight: 700; margin-right: 6px; }
+.explain { color: var(--muted); margin: 6px 0 10px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 14px; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+input, select, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; min-width: 0; }
+textarea { font-family: var(--mono); font-size: 0.82rem; width: 100%; resize: vertical; }
+button { font: inherit; cursor: pointer; border-radius: 6px; padding: 6px 14px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); }
+button.ghost { background: transparent; color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+details { margin-top: 8px; }
+summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+pre { font-family: var(--mono); font-size: 0.8rem; background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow-x: auto; margin: 6px 0 0; max-height: 360px; }
+.status { font-family: var(--mono); font-size: 0.8rem; padding: 2px 8px; border-radius: 999px; }
+.status.ok { background: var(--ok-bg); color: var(--ok); }
+.status.bad { background: var(--bad-bg); color: var(--bad); }
+.hint { font-size: 0.85rem; color: var(--muted); margin: 10px 0 0; }
+.note { font-size: 0.85rem; background: var(--warn-bg); padding: 6px 10px; border-radius: 6px; margin: 8px 0 0; }
+.lights { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin: 10px 0; }
+.light { border-radius: 8px; padding: 10px 12px; border: 1px solid var(--border); }
+.light.ok { background: var(--ok-bg); color: var(--ok); }
+.light.bad { background: var(--bad-bg); color: var(--bad); }
+.light b { display: block; font-size: 1.3rem; }
+footer { text-align: center; color: var(--muted); font-size: 0.85rem; padding: 0 16px 32px; }
+a { color: var(--accent); }

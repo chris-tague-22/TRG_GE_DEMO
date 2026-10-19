@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TRG Tote Flow Demo</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>TRG tote flow: pack → ship</h1>
+      <p class="sub">A step-by-step walkthrough of the BarTender Track &amp; Trace API. Every step shows the exact request, a copyable curl, and the live response.</p>
+    </div>
+    <div class="top-actions">
+      <button id="btn-export-md" class="ghost">Download flow.md</button>
+      <button id="btn-export-sh" class="ghost">Download demo.sh</button>
+      <button id="btn-new-run">Start new run</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card" id="setup">
+      <h2><span class="num">0</span> Setup</h2>
+      <p class="explain">Shared values for every call. The key is held in your browser and forwarded by the local server (it never appears in the curl snippets, which use <code>$API_KEY</code>).</p>
+      <div class="grid">
+        <label>API key <input data-setting="apiKey" type="password" placeholder="leave blank to use .env"></label>
+        <label>Tenant (<code>x-tenant</code>) <input data-setting="tenant"></label>
+        <label>DC (source) <input data-setting="dc"></label>
+        <label>Store A <input data-setting="storeA"></label>
+        <label>Store B <input data-setting="storeB" placeholder="urn:mjx:site:loc:TRGDEMO.0000?.0"></label>
+        <label>Ship to
+          <select data-setting="destination"><option value="storeA">Store A</option><option value="storeB">Store B</option></select>
+        </label>
+        <label>Tote SKU (GTIN-14 / <code>pid</code>) <input data-setting="gtin"></label>
+        <label>Company prefix length <input data-setting="prefixLen" type="number" min="6" max="12"></label>
+        <label>Totes per order <input data-setting="qty" type="number" min="1" max="500"></label>
+        <label>Reader (<code>collectorId</code>) <input data-setting="collectorId"></label>
+        <label>Pack zone channel (<code>channelId</code>) <input data-setting="packChannel"></label>
+        <label>Ship zone channel (<code>channelId</code>) <input data-setting="shipChannel"></label>
+      </div>
+      <p class="hint" id="run-ids"></p>
+    </section>
+
+    <div id="steps"></div>
+
+    <section class="card disabled">
+      <h2><span class="num">9</span> Receive at store <span class="tag">coming next</span></h2>
+      <p class="explain">The store reads the totes on arrival and the order is received and closed. This step gets added once the receive calls are confirmed.</p>
+    </section>
+  </main>
+
+  <footer>Reference for AI tools: <a href="/docs/API-FLOW.md" target="_blank">docs/API-FLOW.md</a></footer>
+  <script src="app.js"></script>
+</body>
+</html>

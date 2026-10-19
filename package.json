@@ -1,0 +1,12 @@
+{
+  "name": "trg-api-demo",
+  "version": "0.1.0",
+  "description": "Interactive walkthrough of the BarTender Track & Trace pack -> ship order flow",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
