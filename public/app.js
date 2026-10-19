@@ -496,7 +496,7 @@ function renderResult(step, card) {
   const ok = r.status >= 200 && r.status < 300;
   slot.innerHTML = `<span class="status ${ok ? 'ok' : 'bad'}">${r.status || 'ERR'} · ${r.ms} ms</span> <span class="hint">${r.method} ${r.path}${r.retries ? ` · gateway "not_owned" retried ${r.retries}×` : ''}</span>`;
   if (r.status === 401 && r.text.includes('not_owned')) {
-    slot.innerHTML += ' <span class="hint">The API gateway intermittently rejects valid keys with "not_owned" (already retried 3×) — run again.</span>';
+    slot.innerHTML += ' <span class="hint">The API gateway intermittently rejects valid keys with "not_owned" (already retried 6×) — wait a few seconds and run again. Nothing was saved, so it is safe.</span>';
   }
   wrap.hidden = false;
   card.querySelector('.resp').textContent = r.text;

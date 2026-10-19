@@ -309,6 +309,6 @@ function sgtin96(gtin14, prefixLen, serial, filter = 0) {
 - Compare can 404 for a few seconds after reads; empty lists come back as `{}`.
 - **Intermittent `401 {"error":"not_owned","message":"unauthorized"}` with a valid key** — about 1 in 3 calls at times.
   It is rejected in ~2 ms before reaching the service, so the call was not processed and is safe to retry
-  (the demo server retries up to 3×). Reported to the platform team.
+  (the demo server retries up to 6×, backing off 0.5–3 s). Reported to the platform team.
 - Postman examples contain `// comments` inside the JSON — strip them; the API needs valid JSON.
 - Use a unique `transactionId` per order, identical between the order and its reads.

@@ -43,9 +43,9 @@ async function proxy(req, res) {
   for (;;) {
     upstream = await fetch(target, { method: req.method, headers, body: body || undefined });
     text = await upstream.text();
-    if (!(upstream.status === 401 && text.includes('not_owned') && retries < 3)) break;
+    if (!(upstream.status === 401 && text.includes('not_owned') && retries < 6)) break;
     retries++;
-    await new Promise((r) => setTimeout(r, 500 * retries));
+    await new Promise((r) => setTimeout(r, 500 * retries)); // 0.5s, 1s, … 3s: about 10s in total
   }
   console.log(`${req.method} ${target} -> ${upstream.status} (${Date.now() - started}ms${retries ? `, ${retries} not_owned retries` : ''})`);
 
