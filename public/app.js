@@ -98,7 +98,7 @@ const STEPS = [
   ...orderLeg('asn', {
     phase: 'Store receiving',
     endpoint: 'asn',
-    what: 'ASN',
+    what: 'Store ASN',
     from: () => settings.dc,
     to: () => settings.store,
     createExplain:
@@ -236,7 +236,7 @@ function compareStep(leg, o) {
   return {
     id: `${leg}-compare`,
     leg,
-    title: `Check: expected vs. read (${o.label.toLowerCase()})`,
+    title: `Check: expected vs. read (${o.label})`,
     explain:
       'The API compares expected EPCs with everything read under the transactionId: matching / missing / notExpected. ' +
       'Reads are processed asynchronously, so right after reading this can 404 ("No global results…") for a few seconds — the app retries.',
