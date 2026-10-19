@@ -36,14 +36,23 @@ async function proxy(req, res) {
   };
   if (body) headers['Content-Type'] = 'application/json';
 
+  // The gateway intermittently answers 401 {"error":"not_owned"} for a valid key. Those are rejected
+  // before reaching the service (~2 ms), so the call was not processed and is safe to repeat.
   const started = Date.now();
-  const upstream = await fetch(target, { method: req.method, headers, body: body || undefined });
-  const text = await upstream.text();
-  console.log(`${req.method} ${target} -> ${upstream.status} (${Date.now() - started}ms)`);
+  let upstream, text, retries = 0;
+  for (;;) {
+    upstream = await fetch(target, { method: req.method, headers, body: body || undefined });
+    text = await upstream.text();
+    if (!(upstream.status === 401 && text.includes('not_owned') && retries < 3)) break;
+    retries++;
+    await new Promise((r) => setTimeout(r, 500 * retries));
+  }
+  console.log(`${req.method} ${target} -> ${upstream.status} (${Date.now() - started}ms${retries ? `, ${retries} not_owned retries` : ''})`);
 
   res.writeHead(upstream.status, {
     'Content-Type': upstream.headers.get('content-type') || 'text/plain',
     'X-Upstream-Ms': String(Date.now() - started),
+    'X-NotOwned-Retries': String(retries),
   });
   res.end(text);
 }

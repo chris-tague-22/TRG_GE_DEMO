@@ -1,8 +1,16 @@
 # TRG tote flow demo
 
-Interactive walkthrough of the BarTender Track & Trace API for RFID tote (RPC) tracking:
-create a packing order → read totes into it → close it → create an EPC-level shipping order →
-read at the dock → compare expected vs. read → close. Each step shows the request, a copyable curl and the live response.
+Interactive walkthrough of the BarTender Track & Trace API for RFID tote (RPC) tracking, covering the full loop:
+
+1. **DC packing:** SKU-level packing order, totes read in, closed with the actual EPCs
+2. **DC → store shipment:** EPC-level shipping order, dock read, expected-vs-read check, close
+3. **Store receiving:** ASN created automatically when the shipment closes, totes received onto the sales floor
+4. **Empty pool:** totes pushed through the tunnel (a plain read, no order)
+5. **Store → DC return:** EPC-level shipping order back to the DC
+6. **DC receiving:** ASN at the DC, receive, check, close
+
+Each step shows the request, a copyable curl and the live response. "Drop one tote" / "Add a stray tote"
+buttons simulate a bad load so the red/green check can be demonstrated.
 
 ## Run it
 

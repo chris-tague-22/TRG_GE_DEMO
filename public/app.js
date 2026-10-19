@@ -1,5 +1,10 @@
 // TRG tote flow demo — all the API logic lives in STEPS below.
 // Each step = one API call: method, path, body, plus what to remember from the response.
+//
+// The full loop for a set of returnable totes (RPCs):
+//   DC packing → DC shipping → store receiving (ASN) → empty pool → return shipping → DC receiving (ASN)
+// Ship orders and ASNs use the same four-call pattern: create (PUT), read tags (POST /datacollector/reads
+// with the order's transactionId), compare expected vs. read (GET), close (PUT with status "done").
 
 const API_BASE_DEFAULT = 'https://api.bartender-tt.com';
 
@@ -7,15 +12,20 @@ const DEFAULT_SETTINGS = {
   apiKey: '',
   tenant: 'TRGDEMO',
   dc: 'urn:mjx:site:loc:TRGDEMO.00006.0',      // DC00001
-  storeA: 'urn:mjx:site:loc:TRGDEMO.00007.0',  // ST00199
-  storeB: '',
-  destination: 'storeA',
+  store: 'urn:mjx:site:loc:TRGDEMO.00007.0',   // ST00199
   gtin: '00030034990015',                      // RPC tote SKU
   prefixLen: 7,
   qty: 20,
-  collectorId: 'DC_Collector',
+  // Readers (data collectors) and their channels. Each channel is mapped to a workflow in Track & Trace.
+  dcCollectorId: 'DC_Collector',
   packChannel: 'SHIP',
-  shipChannel: 'SHIP',
+  dcShipChannel: 'SHIP',                       // Shipping / In Transit
+  dcRecvChannel: 'RECV',                       // Receiving
+  storeCollectorId: 'ST00199_Collector',
+  storeRecvChannel: 'RECV',                    // Receiving / On Sales Floor
+  storePoolChannel: 'MOVE_EmptyPool',          // Storing / Stored (the tunnel into the empty pool)
+  storeShipChannel: 'SHIP',                    // Shipping / In Transit
+  autoAsn: true,                               // create the receiving ASN as soon as a shipment is closed
 };
 
 let apiBase = API_BASE_DEFAULT;
@@ -27,155 +37,247 @@ let run = null; // set in init()
 // ---------------------------------------------------------------------------
 
 const STEPS = [
-  {
-    id: 'createPack',
-    phase: 'Packing at the DC',
+  // --- DC packing: SKU-level order, totes read in, closed with the actual EPCs ---
+  createStep('pack', {
+    phase: 'DC packing',
     title: 'Create packing order (SKU level)',
     explain:
-      'A packing order is a ship order with contentFormat "quantity": it says "pack N of this SKU", not which tags. ' +
-      'transactionId is the handle that tag reads use to attach to this order. Uses PUT on the collection URL.',
-    method: 'PUT',
-    path: () => '/logistics/shiporder',
-    body: () => ({
-      soId: run.packSoId,
-      contentFormat: 'quantity',
-      transactionId: run.packTxn,
-      creationTime: run.startedAt,
-      expirationTime: null,
-      lastStatusChange: run.startedAt,
-      source: settings.dc,
-      destination: destination(),
-      containers: [{ content: [{ format: 'quantity', quantity: Number(settings.qty), pid: settings.gtin }] }],
-    }),
-    after: (json, text) => { run.packId = findOrderId(json, text) || String(run.packSoId); },
-  },
-  {
-    id: 'readPack',
+      'A packing order is a ship order with contentFormat "quantity": "pack N of this SKU", not which tags. ' +
+      'transactionId is the handle tag reads use to attach to this order. The response is the new order id.',
+    endpoint: 'shiporder',
+    from: () => settings.dc,
+    to: () => settings.store,
+    contentFormat: 'quantity',
+    containers: () => [{ content: [{ format: 'quantity', quantity: Number(settings.qty), pid: settings.gtin }] }],
+  }),
+  readStep('pack', {
     title: 'Read totes into the packing order',
     explain:
-      'Simulates the RFID reader at the packing zone. Tag reads go to the data collector, not the order endpoint — ' +
-      'the transactionId ties them to the packing order, and collectorId + channelId identify the reader/zone. ' +
-      'EPCs below are real SGTIN-96 encodings of the tote SKU.',
-    method: 'POST',
-    path: () => '/datacollector/reads',
+      'Simulates the RFID reader at the packing station. Reads go to the data collector, not the order: ' +
+      'the transactionId ties them to the order, collectorId + channelId identify reader and zone (both are validated). ' +
+      'The EPCs below are real SGTIN-96 encodings of the tote SKU.',
+    collector: () => settings.dcCollectorId,
+    channel: () => settings.packChannel,
     extra: 'epcs',
-    body: () => reads(run.packTxn, settings.packChannel, run.epcs),
-  },
+  }),
   {
-    id: 'getPack',
+    id: 'pack-get',
     title: 'Check the packing order',
-    explain: 'Fetch the order back to see its state and what has been read against it.',
+    explain: 'Fetch the order back to see its state.',
     method: 'GET',
-    path: () => `/logistics/shiporder/${run.packId || '{packId}'}`,
+    path: () => `/logistics/shiporder/${run.legs.pack.id || '{packId}'}`,
   },
-  {
-    id: 'closePack',
+  closeStep('pack', {
     title: 'Close the packing order',
     explain:
-      'PUT on the order URL (the ID returned in step 1) with status "done". contentFormat switches to "tag" and the ' +
-      'packed EPCs are listed, so the order records exactly which totes were packed. ' +
-      'The PUT replaces the whole order — send the contents again or they are wiped.',
-    method: 'PUT',
-    path: () => `/logistics/shiporder/${run.packId || '{packId}'}`,
-    body: () => ({
-      contentFormat: 'tag',
-      transactionId: run.packTxn,
-      status: 'done',
-      source: settings.dc,
-      destination: destination(),
-      containers: tagContainers(run.epcs),
-    }),
-  },
-  {
-    id: 'createShip',
-    phase: 'Shipping from the DC',
-    title: 'Create shipping order (EPC level)',
+      'PUT on the order URL with status "done". contentFormat switches to "tag" and the packed EPCs are listed, ' +
+      'so the order records exactly which totes were packed. The PUT replaces the whole order — always resend the contents.',
+    endpoint: 'shiporder',
+    from: () => settings.dc,
+    to: () => settings.store,
+  }),
+
+  // --- DC → store shipment ---
+  ...orderLeg('ship', {
+    phase: 'DC shipping to the store',
+    endpoint: 'shiporder',
+    what: 'shipping order',
+    from: () => settings.dc,
+    to: () => settings.store,
+    createExplain:
+      'Same endpoint as packing, but contentFormat "tag": one entry per packed EPC. This is the exact list the dock should see.',
+    readTitle: 'Read totes at the DC shipping dock',
+    collector: () => settings.dcCollectorId,
+    channel: () => settings.dcShipChannel,
+    simFrom: 'packed',
+    label: 'Shipment',
+    thenAuto: 'asn-create',
+  }),
+
+  // --- Store receives: ASN with the shipped EPCs, read on the floor ---
+  ...orderLeg('asn', {
+    phase: 'Store receiving',
+    endpoint: 'asn',
+    what: 'ASN',
+    from: () => settings.dc,
+    to: () => settings.store,
+    createExplain:
+      'An Advanced Shipping Notice tells the store what is on its way: the same EPCs that were shipped. ' +
+      'destination is the receiving site (the ASN appears in its Receiving workflow), source the site it ships from. ' +
+      'The response is the new asnId.',
+    auto: true,
+    readTitle: 'Receive totes onto the sales floor',
+    readExplain:
+      'The store reader\'s RECV channel is mapped to Receiving / On Sales Floor. Only reads on a RECEIVING or SHIPPING ' +
+      'channel with the ASN\'s transactionId count towards the ASN.',
+    collector: () => settings.storeCollectorId,
+    channel: () => settings.storeRecvChannel,
+    simFrom: 'shipped',
+    label: 'Receipt',
+  }),
+
+  // --- Empties pushed through the tunnel into the empty pool (no order) ---
+  readStep('pool', {
+    phase: 'Store empty pool',
+    title: 'Push totes through the tunnel into the empty pool',
     explain:
-      'Same endpoint as step 1, but contentFormat "tag": one content entry per EPC that was packed. ' +
-      'This is the exact list the shipping dock is expected to see.',
+      'A plain read on the MOVE_EmptyPool channel (mapped to Storing / Stored). No order is involved, so no transactionId — ' +
+      'the read alone moves the totes into the empty pool.',
+    collector: () => settings.storeCollectorId,
+    channel: () => settings.storePoolChannel,
+    noTransaction: true,
+  }),
+
+  // --- Store → DC return of the empties ---
+  ...orderLeg('ret', {
+    phase: 'Return shipping to the DC',
+    endpoint: 'shiporder',
+    what: 'return shipping order',
+    from: () => settings.store,
+    to: () => settings.dc,
+    createExplain: 'The empties go back: an EPC-level shipping order from the store to the DC.',
+    readTitle: 'Read totes at the store shipping door',
+    collector: () => settings.storeCollectorId,
+    channel: () => settings.storeShipChannel,
+    simFrom: 'pooled',
+    label: 'Return shipment',
+    thenAuto: 'dcAsn-create',
+  }),
+
+  // --- DC receives the empties ---
+  ...orderLeg('dcAsn', {
+    phase: 'DC receiving the empties',
+    endpoint: 'asn',
+    what: 'DC ASN',
+    from: () => settings.store,
+    to: () => settings.dc,
+    createExplain: 'ASN at the DC for the returning totes, so the DC receiving dock knows what to expect.',
+    auto: true,
+    readTitle: 'Receive totes at the DC',
+    collector: () => settings.dcCollectorId,
+    channel: () => settings.dcRecvChannel,
+    simFrom: 'returned',
+    label: 'DC receipt',
+  }),
+];
+
+// ---------------------------------------------------------------------------
+// Step builders — one per kind of call
+// ---------------------------------------------------------------------------
+
+const ID_FIELD = { shiporder: 'soId', asn: 'asnId' };
+
+// The four calls every ship order / ASN goes through.
+function orderLeg(leg, o) {
+  return [
+    createStep(leg, { ...o, title: `Create ${o.what} (EPC level)`, explain: o.createExplain, contentFormat: 'tag', containers: () => tagContainers(run.epcs) }),
+    readStep(leg, { title: o.readTitle, explain: o.readExplain || `Tag reads with this ${o.what}'s transactionId. Use the buttons to simulate a short or wrong load and watch the next check go red. Reads add up — start a new run for a clean load.`, collector: o.collector, channel: o.channel, extra: 'sim', simFrom: o.simFrom }),
+    compareStep(leg, o),
+    closeStep(leg, { ...o, title: `Close the ${o.what}`, explain: `Status "done", resending the contents (the PUT replaces the record).${o.thenAuto ? ' With auto-create on, this also creates the receiving ASN.' : ''}` }),
+  ];
+}
+
+function createStep(leg, o) {
+  return {
+    id: `${leg}-create`,
+    phase: o.phase,
+    title: o.title,
+    explain: o.explain,
     method: 'PUT',
-    path: () => '/logistics/shiporder',
+    path: () => `/logistics/${o.endpoint}`,
+    extra: o.auto ? 'auto' : undefined,
     body: () => ({
-      soId: run.shipSoId,
-      contentFormat: 'tag',
-      transactionId: run.shipTxn,
+      [ID_FIELD[o.endpoint]]: run.legs[leg].soId,
+      contentFormat: o.contentFormat,
+      transactionId: run.legs[leg].txn,
       creationTime: new Date().toISOString(),
       expirationTime: null,
       lastStatusChange: new Date().toISOString(),
-      source: settings.dc,
-      destination: destination(),
-      containers: tagContainers(run.epcs),
+      source: o.from(),
+      destination: o.to(),
+      containers: o.containers(),
     }),
-    after: (json, text) => { run.shipId = findOrderId(json, text) || String(run.shipSoId); },
-  },
-  {
-    id: 'readShip',
-    title: 'Read totes at the shipping dock',
-    explain:
-      'Same data-collector call as step 2, now with the shipping transactionId and the ship zone channel. ' +
-      'Use the buttons to simulate a short or wrong shipment and watch the check in step 7 go red. ' +
-      'Reads add up — anything already sent stays read, so start a new run to go back to a clean shipment.',
+    // The create response is the new id as a bare number — NOT the soId/asnId we sent.
+    after: (json, text) => { run.legs[leg].id = findOrderId(json, text) || String(run.legs[leg].soId); },
+  };
+}
+
+function readStep(leg, o) {
+  return {
+    id: `${leg}-read`,
+    leg,
+    phase: o.phase,
+    title: o.title,
+    explain: o.explain,
     method: 'POST',
     path: () => '/datacollector/reads',
-    extra: 'shipSim',
-    body: () => reads(run.shipTxn, settings.shipChannel, run.shipReads),
-  },
-  {
-    id: 'compareShip',
-    title: 'Check: expected vs. read',
+    extra: o.extra,
+    simFrom: o.simFrom,
+    body: () => ({
+      collectorId: o.collector(),
+      channelId: o.channel(),
+      readTime: new Date().toISOString(),
+      ...(o.noTransaction ? {} : { transactionId: run.legs[leg].txn }),
+      tags: (run.reads[leg] || run.epcs).map((hexa) => ({ hexa, attributes: {} })),
+    }),
+  };
+}
+
+function compareStep(leg, o) {
+  const idOf = () => run.legs[leg].id || `{${leg}Id}`;
+  return {
+    id: `${leg}-compare`,
+    leg,
+    title: `Check: expected vs. read (${o.label.toLowerCase()})`,
     explain:
-      'The API compares the order\'s expected EPCs with everything read under its transactionId and returns ' +
-      'matching / missing / notExpected. Reads are processed asynchronously, so right after step 6 this can 404 ' +
-      'for a few seconds ("No global results…") — the app retries automatically.',
+      'The API compares expected EPCs with everything read under the transactionId: matching / missing / notExpected. ' +
+      'Reads are processed asynchronously, so right after reading this can 404 ("No global results…") for a few seconds — the app retries.',
     method: 'GET',
-    path: () => `/logistics/shiporder/compare/${run.shipId || '{shipId}'}`,
+    path: () => `/logistics/${o.endpoint}/compare/${idOf()}`,
     extra: 'lights',
+    label: o.label,
+    getPath: () => `/logistics/${o.endpoint}/${idOf()}`,
     retryOn404: true,
-    after: (json) => { run.compare = json; },
-  },
-  {
-    id: 'closeShip',
-    title: 'Close the shipping order',
-    explain: 'Mark the shipment done once the dock read matches. As in step 4, resend the contents with the status change.',
+    after: (json) => { run.compare[leg] = json; },
+  };
+}
+
+function closeStep(leg, o) {
+  return {
+    id: `${leg}-close`,
+    title: o.title,
+    explain: o.explain,
     method: 'PUT',
-    path: () => `/logistics/shiporder/${run.shipId || '{shipId}'}`,
+    path: () => `/logistics/${o.endpoint}/${run.legs[leg].id || `{${leg}Id}`}`,
     body: () => ({
       contentFormat: 'tag',
-      transactionId: run.shipTxn,
+      transactionId: run.legs[leg].txn,
       status: 'done',
-      source: settings.dc,
-      destination: destination(),
+      source: o.from(),
+      destination: o.to(),
       containers: tagContainers(run.epcs),
     }),
-  },
-];
+    after: () => { if (o.thenAuto && settings.autoAsn) setTimeout(() => runStep(o.thenAuto)); },
+  };
+}
+
+function runStep(id) {
+  const step = STEPS.find((s) => s.id === id);
+  execute(step, document.getElementById(`step-${id}`));
+}
 
 function tagContainers(epcs) {
   return [{ content: epcs.map((hexa) => ({ format: 'tag', hexa })) }];
 }
 
-function reads(transactionId, channelId, epcs) {
-  return {
-    collectorId: settings.collectorId,
-    channelId,
-    readTime: new Date().toISOString(),
-    transactionId,
-    tags: epcs.map((hexa) => ({ hexa, attributes: {} })),
-  };
-}
-
-function destination() {
-  return settings[settings.destination] || settings.storeA;
-}
-
-// The create call returns the order id the API assigned (a bare number like 8457557468661109),
-// which is NOT the soId we sent. Update/close/get must use the returned id.
+// Create returns the id the API assigned (a bare number like 8457557468661109).
+// Read it from the text: these ids are near the JS number precision limit.
 function findOrderId(json, text) {
-  if (/^\s*"?\d+"?\s*$/.test(text || '')) return text.trim().replace(/"/g, ''); // read from text: ids are near the JS number precision limit
+  if (/^\s*"?\d+"?\s*$/.test(text || '')) return text.trim().replace(/"/g, '');
   if (!json || typeof json !== 'object') return null;
-  for (const obj of [json, json.data, json.shipOrder, json.result]) {
+  for (const obj of [json, json.data, json.result]) {
     if (!obj || typeof obj !== 'object') continue;
-    for (const k of ['soId', 'id', '_id', 'shipOrderId']) if (obj[k] != null) return String(obj[k]);
+    for (const k of ['soId', 'asnId', 'id']) if (obj[k] != null) return String(obj[k]);
   }
   return null;
 }
@@ -208,26 +310,27 @@ function generateEpcs() {
 // Run state
 // ---------------------------------------------------------------------------
 
+const LEGS = { pack: 'PACK', ship: 'SHIP', asn: 'RECV', ret: 'RTN', dcAsn: 'DCRECV' };
+const SIM_LEGS = ['ship', 'asn', 'ret', 'dcAsn'];
+
 function newRun() {
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(2, 14); // YYMMDDhhmmss
-  const r = {
-    startedAt: new Date().toISOString(),
-    packTxn: `PACK-${stamp}`,
-    shipTxn: `SHIP-${stamp}`,
-    packSoId: soId(),
-    shipSoId: soId(),
+  run = {
+    version: 2,
     serialBase: 100000000 + Math.floor(Math.random() * 800000000),
-    packId: null,
-    shipId: null,
     epcs: [],
-    shipReads: [],
-    compare: null,
+    legs: Object.fromEntries(Object.entries(LEGS).map(([leg, prefix]) => [leg, { txn: `${prefix}-${stamp}`, soId: soId(), id: null }])),
+    reads: {},   // per leg: the EPCs the simulated reader will send
+    compare: {}, // per leg: last compare response
     results: {},
   };
-  run = r;
-  r.epcs = generateEpcs();
-  r.shipReads = [...r.epcs];
-  return r;
+  run.epcs = generateEpcs();
+  resetReads();
+  return run;
+}
+
+function resetReads() {
+  for (const leg of SIM_LEGS) { run.reads[leg] = [...run.epcs]; run.compare[leg] = null; }
 }
 
 function soId() {
@@ -287,9 +390,8 @@ function refresh() {
     renderExtra(step, card.querySelector('.extra'));
     renderResult(step, card);
   }
-  const ids = document.getElementById('run-ids');
-  ids.innerHTML = `This run: packing <code>${run.packTxn}</code> (order ${run.packId ? `<code>${run.packId}</code>` : 'not created'}) · ` +
-    `shipping <code>${run.shipTxn}</code> (order ${run.shipId ? `<code>${run.shipId}</code>` : 'not created'})`;
+  document.getElementById('run-ids').innerHTML = 'This run: ' + Object.entries(run.legs)
+    .map(([, l]) => `<code>${l.txn}</code> ${l.id ? `→ <code>${l.id}</code>` : '(not created)'}`).join(' · ');
   save('run', run);
 }
 
@@ -303,13 +405,13 @@ function renderExtra(step, el) {
         <div class="row"><button class="ghost regen">Generate ${settings.qty} new tote EPCs</button></div>`;
       el.querySelector('.epcs').addEventListener('change', (e) => {
         run.epcs = e.target.value.split(/\s+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
-        run.shipReads = [...run.epcs];
+        resetReads();
         refresh();
       });
       el.querySelector('.regen').addEventListener('click', () => {
         run.serialBase = 100000000 + Math.floor(Math.random() * 800000000);
         run.epcs = generateEpcs();
-        run.shipReads = [...run.epcs];
+        resetReads();
         refresh();
       });
     }
@@ -317,35 +419,45 @@ function renderExtra(step, el) {
     if (document.activeElement !== ta) ta.value = run.epcs.join('\n');
   }
 
-  if (step.extra === 'shipSim') {
+  if (step.extra === 'sim') {
+    const leg = step.leg;
     if (!el.dataset.built) {
       el.dataset.built = 1;
       el.innerHTML = `
         <div class="row">
-          <button class="ghost sim-all">Read all packed totes</button>
+          <button class="ghost sim-all">Read all ${step.simFrom} totes</button>
           <button class="ghost sim-drop">Drop one tote</button>
           <button class="ghost sim-stray">Add a stray tote</button>
           <span class="hint sim-count"></span>
         </div>`;
-      el.querySelector('.sim-all').addEventListener('click', () => { run.shipReads = [...run.epcs]; run.compare = null; refresh(); });
-      el.querySelector('.sim-drop').addEventListener('click', () => { run.shipReads.pop(); run.compare = null; refresh(); });
-      el.querySelector('.sim-stray').addEventListener('click', () => {
-        run.shipReads.push(sgtin96(settings.gtin, Number(settings.prefixLen), Math.floor(Math.random() * 99999999)));
-        run.compare = null;
-        refresh();
-      });
+      const changed = (fn) => () => { fn(); run.compare[leg] = null; refresh(); };
+      el.querySelector('.sim-all').addEventListener('click', changed(() => { run.reads[leg] = [...run.epcs]; }));
+      el.querySelector('.sim-drop').addEventListener('click', changed(() => { run.reads[leg].pop(); }));
+      el.querySelector('.sim-stray').addEventListener('click', changed(() => {
+        run.reads[leg].push(sgtin96(settings.gtin, Number(settings.prefixLen), Math.floor(Math.random() * 99999999)));
+      }));
     }
-    el.querySelector('.sim-count').textContent = `${run.shipReads.length} tags will be sent`;
+    el.querySelector('.sim-count').textContent = `${run.reads[leg].length} tags will be sent`;
+  }
+
+  if (step.extra === 'auto') {
+    if (!el.dataset.built) {
+      el.dataset.built = 1;
+      el.innerHTML = `<label class="check"><input type="checkbox" class="auto"> Create receiving ASNs automatically when the shipping order is closed</label>`;
+      el.querySelector('.auto').addEventListener('change', (e) => { settings.autoAsn = e.target.checked; save('settings', settings); });
+    }
+    el.querySelector('.auto').checked = !!settings.autoAsn;
   }
 
   if (step.extra === 'lights') {
-    // Prefer the API's answer (step 7); before that, preview from what was sent in steps 5 and 6.
+    // Prefer the API's compare answer; before that, preview from the EPCs sent in the previous two steps.
     // Note: the API returns an empty list as {} rather than [].
+    const leg = step.leg;
     const list = (v) => (Array.isArray(v) ? v : []).map((t) => t.hexa || t.epc);
-    const c = run.compare && run.compare.containers ? run.compare : null;
+    const c = run.compare[leg] && run.compare[leg].containers ? run.compare[leg] : null;
     const sum = (key) => (c ? c.containers.flatMap((k) => list(k[key])) : null);
     const expected = new Set(run.epcs);
-    const read = new Set(run.shipReads);
+    const read = new Set(run.reads[leg]);
     const missing = c ? sum('missing') : [...expected].filter((e) => !read.has(e));
     const unexpected = c ? sum('notExpected') : [...read].filter((e) => !expected.has(e));
     const matched = c ? c.matchCount : [...read].filter((e) => expected.has(e)).length;
@@ -353,18 +465,18 @@ function renderExtra(step, el) {
     const expCount = matched + missing.length;
     const light = (ok, label, value) => `<div class="light ${ok ? 'ok' : 'bad'}">${label}<b>${value}</b></div>`;
     el.innerHTML = `
-      <p class="hint">${c ? 'Result from the API compare call.' : 'Preview from the EPCs sent in steps 5–6 — run this step for the API\'s answer.'}</p>
+      <p class="hint">${c ? 'Result from the API compare call.' : 'Preview from the EPCs in the read step above — run this step for the API\'s answer.'}</p>
       <div class="lights">
         ${light(readCount === expCount, 'Quantity (read / expected)', `${readCount} / ${expCount}`)}
         ${light(missing.length === 0, 'Missing totes', missing.length)}
         ${light(unexpected.length === 0, 'Unexpected totes', unexpected.length)}
-        ${light(missing.length === 0 && unexpected.length === 0, 'Shipment', missing.length || unexpected.length ? 'MISMATCH' : 'OK')}
+        ${light(missing.length === 0 && unexpected.length === 0, step.label, missing.length || unexpected.length ? 'MISMATCH' : 'OK')}
       </div>
       ${missing.length ? `<details><summary>Missing EPCs</summary><pre>${missing.join('\n')}</pre></details>` : ''}
       ${unexpected.length ? `<details><summary>Unexpected EPCs</summary><pre>${unexpected.join('\n')}</pre></details>` : ''}
-      <div class="row"><button class="ghost get-order">Also GET /logistics/shiporder/${run.shipId || '{shipId}'}</button></div>`;
+      <div class="row"><button class="ghost get-order">Also GET ${step.getPath()}</button></div>`;
     el.querySelector('.get-order').addEventListener('click', () =>
-      execute({ ...step, path: () => `/logistics/shiporder/${run.shipId}` }, document.getElementById(`step-${step.id}`)));
+      execute({ ...step, path: step.getPath }, document.getElementById(`step-${step.id}`)));
   }
 }
 
@@ -374,7 +486,10 @@ function renderResult(step, card) {
   const wrap = card.querySelector('.resp-wrap');
   if (!r) { slot.innerHTML = ''; wrap.hidden = true; return; }
   const ok = r.status >= 200 && r.status < 300;
-  slot.innerHTML = `<span class="status ${ok ? 'ok' : 'bad'}">${r.status || 'ERR'} · ${r.ms} ms</span> <span class="hint">${r.method} ${r.path}</span>`;
+  slot.innerHTML = `<span class="status ${ok ? 'ok' : 'bad'}">${r.status || 'ERR'} · ${r.ms} ms</span> <span class="hint">${r.method} ${r.path}${r.retries ? ` · gateway "not_owned" retried ${r.retries}×` : ''}</span>`;
+  if (r.status === 401 && r.text.includes('not_owned')) {
+    slot.innerHTML += ' <span class="hint">The API gateway intermittently rejects valid keys with "not_owned" (already retried 3×) — run again.</span>';
+  }
   wrap.hidden = false;
   card.querySelector('.resp').textContent = r.text;
 }
@@ -410,7 +525,7 @@ async function execute(step, card) {
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch {}
-    result = { status: res.status, ms: Math.round(performance.now() - started), text: json ? JSON.stringify(json, null, 2) : text || '(empty body)' };
+    result = { status: res.status, ms: Math.round(performance.now() - started), retries: Number(res.headers.get('X-NotOwned-Retries') || 0), text: json ? JSON.stringify(json, null, 2) : text || '(empty body)' };
     if (res.ok && step.after) step.after(json, text);
   } catch (err) {
     result = { status: 0, ms: Math.round(performance.now() - started), text: 'Could not reach the local server: ' + err.message };
@@ -444,7 +559,8 @@ function curlFor(step, bodyOverride) {
 function exportShell() {
   const parts = [
     '#!/usr/bin/env bash',
-    '# TRG tote flow: replay of the pack -> ship calls, with the values from this demo run.',
+    '# TRG tote flow: replay of every call (pack -> ship -> receive -> empty pool -> return -> DC receive),',
+    '# with the values from this demo run.',
     '# Usage: API_KEY=xxxx ./demo.sh',
     'set -euo pipefail',
     ': "${API_KEY:?set API_KEY first}"',
@@ -458,17 +574,18 @@ function exportShell() {
 
 function exportMarkdown() {
   const out = [
-    '# TRG tote flow — pack → ship (BarTender Track & Trace API)',
+    '# TRG tote flow — pack → ship → receive → empty pool → return (BarTender Track & Trace API)',
     '',
     `Base URL: \`${apiBase}\`  `,
     'Headers on every call: `apiKey: <key>`, `x-tenant: ' + settings.tenant + '`, `Content-Type: application/json`',
     '',
-    `Locations: DC \`${settings.dc}\` → store \`${destination()}\`. Tote SKU (pid/GTIN-14) \`${settings.gtin}\`, ${settings.qty} totes.`,
+    `Locations: DC \`${settings.dc}\`, store \`${settings.store}\`. Tote SKU (pid/GTIN-14) \`${settings.gtin}\`, ${settings.qty} totes.`,
     '',
     'Key ideas:',
-    '- Packing and shipping orders both use `/logistics/shiporder`. `contentFormat: "quantity"` = SKU-level (packing); `"tag"` = EPC-level (shipping).',
-    '- RFID reads go to `/datacollector/reads`. The `transactionId` in the read ties it to an order; `collectorId` + `channelId` identify reader/zone.',
-    '- Create with `PUT /logistics/shiporder`; update/close with `PUT /logistics/shiporder/{id}` using the id returned by create.',
+    '- Ship orders (`/logistics/shiporder`) and ASNs (`/logistics/asn`) follow the same pattern: create (PUT), reads, compare, close (PUT status done).',
+    '- `contentFormat: "quantity"` = SKU-level (packing); `"tag"` = EPC-level.',
+    '- RFID reads go to `/datacollector/reads`. The `transactionId` ties a read to an order; `collectorId` + `channelId` identify reader and zone.',
+    '- Create returns the new id; update/close/compare use it. The update PUT replaces the record — resend the contents.',
     '',
   ];
   STEPS.forEach((step, i) => {
@@ -502,13 +619,13 @@ async function copy(text, btn) {
 function bindSetup() {
   document.querySelectorAll('[data-setting]').forEach((el) => {
     const key = el.dataset.setting;
-    el.value = settings[key];
+    el.value = settings[key] ?? '';
     el.addEventListener('change', () => {
       settings[key] = el.value.trim();
       save('settings', settings);
       if (key === 'gtin' || key === 'prefixLen' || key === 'qty') {
         run.epcs = generateEpcs();
-        run.shipReads = [...run.epcs];
+        resetReads();
       }
       refresh();
     });
@@ -524,10 +641,10 @@ function bindSetup() {
 }
 
 function load(key) {
-  try { return JSON.parse(localStorage.getItem('trg-demo-' + key)); } catch { return null; }
+  try { return JSON.parse(localStorage.getItem('trg-demo-v2-' + key)); } catch { return null; }
 }
 function save(key, value) {
-  try { localStorage.setItem('trg-demo-' + key, JSON.stringify(value)); } catch {}
+  try { localStorage.setItem('trg-demo-v2-' + key, JSON.stringify(value)); } catch {}
 }
 
 (async function init() {
@@ -536,7 +653,8 @@ function save(key, value) {
     apiBase = cfg.apiBase || apiBase;
     if (!settings.tenant && cfg.tenant) settings.tenant = cfg.tenant;
   } catch {}
-  run = load('run') || newRun();
+  run = load('run');
+  if (!run || run.version !== 2) newRun();
   bindSetup();
   render();
 })();

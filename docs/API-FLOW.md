@@ -1,15 +1,22 @@
-# TRG tote flow — API reference (pack → ship)
+# TRG tote loop — API reference
 
-Reference for developers and AI coding tools (Cursor, etc.) integrating RFID tote tracking with the
+Reference for developers and AI coding tools (Cursor, etc.) integrating RFID tote (RPC) tracking with the
 BarTender Track & Trace API. The interactive app in this repo runs every call below live.
-All requests and responses here were verified against the live API on 2026-10-19.
+Every request and response here was verified against the live API on 2026-10-19.
+
+```
+DC00001                                   ST00199                                   DC00001
+pack order → ship order ──── totes ────►  ASN → receive onto floor
+                                          tunnel → empty pool (no order)
+                                          return ship order ──── empties ────►      ASN → receive
+```
 
 ## Basics
 
 | | |
 |---|---|
 | Base URL | `https://api.bartender-tt.com` |
-| Auth | header `apiKey: <your key>` (without it: `401 {"message":"apikey or basic auth is required"}`) |
+| Auth | header `apiKey: <your key>` |
 | Tenant | header `x-tenant: TRGDEMO` |
 | Body | `Content-Type: application/json` — plain JSON, no comments |
 
@@ -17,200 +24,123 @@ All requests and responses here were verified against the live API on 2026-10-19
 
 | What | Value |
 |---|---|
-| DC (source) — DC00001 | `urn:mjx:site:loc:TRGDEMO.00006.0` |
-| Store A — ST00199 | `urn:mjx:site:loc:TRGDEMO.00007.0` |
-| Store B | _TBD_ |
+| DC — DC00001 | `urn:mjx:site:loc:TRGDEMO.00006.0` |
+| Store — ST00199 | `urn:mjx:site:loc:TRGDEMO.00007.0` |
 | Tote SKU (`pid`, GTIN-14) | `00030034990015` |
-| Tote EPCs | SGTIN-96 hex, company prefix `0030034` (7 digits), e.g. `301401D54860AE40000EFEED` (serial 982765) |
-| Reader | `collectorId: DC_Collector` |
-| Zone / antenna | `channelId: SHIP` |
+| Tote EPCs | SGTIN-96 hex, company prefix `0030034` (7 digits), e.g. `301401D54860AE40000EFEED` |
 
-## Concepts
+### Readers and channels
 
-- **One endpoint for both order types.** Packing and shipping orders are both ship orders at `/logistics/shiporder`.
-  - `contentFormat: "quantity"` → SKU level ("pack 20 of pid X") — the **packing order**.
-  - `contentFormat: "tag"` → EPC level ("these exact 20 tags") — the **shipping order**.
-- **Create = `PUT /logistics/shiporder`** (no id in URL). **Update/close = `PUT /logistics/shiporder/{id}`**.
-  Use the id returned by the create call — it can differ from the `soId` you sent.
-- **Tag reads go to the data collector**, `POST /datacollector/reads`, not to the order.
-  The read's `transactionId` must equal the order's `transactionId`; that is what attaches the tags to the order.
-  `collectorId` + `channelId` identify the reader and antenna/zone the read came from.
-- **Closing** = update with `status: "done"`. **The PUT replaces the whole order** — always resend `containers`
-  with the contents, or the order is saved with empty contents.
+`collectorId` and `channelId` are validated (`COLLECTOR_NOT_FOUND` / `CHANNEL_NOT_FOUND`). Each channel is mapped
+to a workflow in Track & Trace, so **which channel you post to decides what the read means**.
 
-## The flow
+| Reader (`collectorId`) | Channel (`channelId`) | Workflow | Used for |
+|---|---|---|---|
+| `DC_Collector` | `SHIP` | Shipping / In Transit | packing + shipping at the DC |
+| `DC_Collector` | `RECV` | Receiving | DC receiving the empties |
+| `ST00199_Collector` | `RECV` | Receiving / On Sales Floor | store receiving (totes go straight to the floor) |
+| `ST00199_Collector` | `MOVE_EmptyPool` | Storing / Stored | tunnel into the empty pool |
+| `ST00199_Collector` | `SHIP` | Shipping / In Transit | shipping empties back to the DC |
 
-```
-DC packing zone                             DC shipping dock                    Store
-1 create packing order (quantity) ──┐
-2 POST reads (txn = PACK-…)         │
-3 GET order (check)                 │
-4 PUT {packId} status done ─────────┴──► 5 create shipping order (tag = the 20 EPCs)
-                                         6 POST reads (txn = SHIP-…)
-                                         7 GET compare/{shipId}  → expected vs read
-                                         8 PUT {shipId} status done ──────────►  9 receive (next phase)
-```
+(In the T&T UI the store reader is shown as "ST00199 Collector-NAME"; its id is `ST00199_Collector`.)
 
-### 1. Create packing order (SKU level)
+## Core concepts
+
+- **Ship orders and ASNs follow the same four calls:**
+  1. create — `PUT /logistics/shiporder` or `PUT /logistics/asn` → returns the new id
+  2. tag reads — `POST /datacollector/reads` with the order's `transactionId`
+  3. compare — `GET /logistics/{shiporder|asn}/compare/{id}`
+  4. close — `PUT /logistics/{shiporder|asn}/{id}` with `status: "done"`
+- `contentFormat: "quantity"` = SKU level (packing); `"tag"` = EPC level (everything else).
+- **The `transactionId` is the link** between an order and its tag reads. Only reads on a RECEIVING or SHIPPING
+  channel count towards an order/ASN.
+- **Create returns the id as a bare number** (`8457575317691122`), not JSON — and it is **not** the `soId`/`asnId`
+  you sent. Use it for every later call. Keep it as a string (it is near JavaScript's safe-integer limit).
+- **Update is a full replace.** Always resend `containers`; `containers: [{}]` wipes the order's contents.
+- An ASN's `destination` is the receiving site (the ASN appears in that site's Receiving workflow).
+  Ship orders and ASNs share one id space: `GET /logistics/asn/{shipOrderId}` returns the ship order seen as an ASN —
+  that is not a real ASN. Create the ASN explicitly.
+
+## 1. DC packing
+
+### 1a. Create the packing order (SKU level)
 
 ```bash
-curl --request PUT \
-  --url https://api.bartender-tt.com/logistics/shiporder \
-  --header 'Accept: application/json' \
-  --header "apiKey: $API_KEY" \
-  --header 'x-tenant: TRGDEMO' \
-  --header 'Content-Type: application/json' \
+curl --request PUT --url https://api.bartender-tt.com/logistics/shiporder \
+  --header "apiKey: $API_KEY" --header 'x-tenant: TRGDEMO' --header 'Content-Type: application/json' \
   --data '{
   "soId": 8133384547531199,
   "contentFormat": "quantity",
-  "transactionId": "PACK-TEST1",
-  "creationTime": "2026-10-19T05:20:54.735Z",
+  "transactionId": "PACK-261019203846",
+  "creationTime": "2026-10-19T20:38:46.000Z",
   "expirationTime": null,
-  "lastStatusChange": "2026-10-19T05:20:54.735Z",
+  "lastStatusChange": "2026-10-19T20:38:46.000Z",
   "source": "urn:mjx:site:loc:TRGDEMO.00006.0",
   "destination": "urn:mjx:site:loc:TRGDEMO.00007.0",
-  "containers": [
-    { "content": [ { "format": "quantity", "quantity": 20, "pid": "00030034990015" } ] }
-  ]
+  "containers": [ { "content": [ { "format": "quantity", "quantity": 20, "pid": "00030034990015" } ] } ]
 }'
 ```
 
-**Response `201`** — the body is just the new order id (a bare number, not JSON):
+Response `201`: `8457575317691122` → `packId`.
 
-```
-8457559162121116
-```
-
-Keep it → `packId`. It is **not** the `soId` you sent. Treat it as a string: it is close to JavaScript's
-safe-integer limit.
-
-### 2. Read totes into the packing order
+### 1b. Read the totes into it
 
 ```bash
-curl --request POST \
-  --url https://api.bartender-tt.com/datacollector/reads \
-  --header 'Accept: application/json, text/plain' \
-  --header "apiKey: $API_KEY" \
-  --header 'x-tenant: TRGDEMO' \
-  --header 'Content-Type: application/json' \
+curl --request POST --url https://api.bartender-tt.com/datacollector/reads \
+  --header "apiKey: $API_KEY" --header 'x-tenant: TRGDEMO' --header 'Content-Type: application/json' \
   --data '{
   "collectorId": "DC_Collector",
   "channelId": "SHIP",
-  "readTime": "2026-10-19T09:09:44.200Z",
-  "transactionId": "PACK-TEST1",
-  "tags": [
-    { "hexa": "301401D54860AE40000EFEED", "attributes": {} }
-  ]
+  "readTime": "2026-10-19T20:38:50.000Z",
+  "transactionId": "PACK-261019203846",
+  "tags": [ { "hexa": "301401D54860AE40000EFEED", "attributes": {} } ]
 }'
 ```
 
-One entry in `tags` per EPC (20 for a full packing order). Tags can also be sent as `"epc": "urn:epc:id:sgtin:…"` instead of `hexa`.
-
-**Response `200`:**
+One entry in `tags` per EPC. Response `200`:
 
 ```json
 { "collectorId": "DC_Collector", "channelId": "SHIP", "tagsReceived": 20, "epcisEventId": "PLACEHOLDER-0001-02", "status": "COMMITTED" }
 ```
 
-### 3. Get an order
-
-```bash
-curl --request GET \
-  --url https://api.bartender-tt.com/logistics/shiporder/{packId} \
-  --header 'Accept: application/json' \
-  --header "apiKey: $API_KEY" \
-  --header 'x-tenant: TRGDEMO'
-```
-
-**Response `200`:**
+### 1c. Get it — `GET /logistics/shiporder/{packId}`
 
 ```json
 {
-  "soId": 8457559162121116,
-  "transactionId": "PACK-261019201154",
-  "contentFormat": "quantity",
-  "status": "available",
-  "source": "urn:mjx:site:loc:TRGDEMO.00006.0",
-  "destination": "urn:mjx:site:loc:TRGDEMO.00007.0",
+  "soId": 8457575317691122, "transactionId": "PACK-261019203846", "contentFormat": "quantity", "status": "available",
+  "source": "urn:mjx:site:loc:TRGDEMO.00006.0", "destination": "urn:mjx:site:loc:TRGDEMO.00007.0",
   "containers": [ { "content": [ { "format": "quantity", "quantity": 20, "pid": "00030034990015" } ] } ],
-  "creationTime": "2026-10-19T20:11:56.097Z",
-  "updateTime": "2026-10-19T20:11:56.512Z",
-  "lastStatusChange": "2026-10-19T20:11:56.097Z",
-  "expirationTime": null
+  "creationTime": "…", "updateTime": "…", "lastStatusChange": "…", "expirationTime": null
 }
 ```
 
-### 4. Close the packing order
-
-Switch to `contentFormat: "tag"` and list the EPCs that were packed — the order then records exactly which totes went in.
+### 1d. Close it with the packed EPCs
 
 ```bash
-curl --request PUT \
-  --url https://api.bartender-tt.com/logistics/shiporder/{packId} \
-  --header "apiKey: $API_KEY" \
-  --header 'x-tenant: TRGDEMO' \
-  --header 'Content-Type: application/json' \
+curl --request PUT --url https://api.bartender-tt.com/logistics/shiporder/{packId} \
+  --header "apiKey: $API_KEY" --header 'x-tenant: TRGDEMO' --header 'Content-Type: application/json' \
   --data '{
   "contentFormat": "tag",
-  "transactionId": "PACK-TEST1",
+  "transactionId": "PACK-261019203846",
   "status": "done",
   "source": "urn:mjx:site:loc:TRGDEMO.00006.0",
   "destination": "urn:mjx:site:loc:TRGDEMO.00007.0",
-  "containers": [
-    { "content": [
-      { "format": "tag", "hexa": "301401D54860AE40000EFEED" }
-    ] }
-  ]
+  "containers": [ { "content": [ { "format": "tag", "hexa": "301401D54860AE40000EFEED" } ] } ]
 }'
 ```
 
-**Response `204`** (empty body).
+Response `204`.
 
-### 5. Create shipping order (EPC level)
+## 2. DC → store shipment
 
-Same as step 1 but `contentFormat: "tag"` and one content entry per packed EPC:
+| Call | |
+|---|---|
+| Create | `PUT /logistics/shiporder` — as 1a with `contentFormat: "tag"`, `transactionId: "SHIP-…"`, one `{ "format": "tag", "hexa": "…" }` per packed EPC |
+| Read | `POST /datacollector/reads` — `DC_Collector` / `SHIP`, `transactionId: "SHIP-…"` |
+| Compare | `GET /logistics/shiporder/compare/{shipId}` |
+| Close | `PUT /logistics/shiporder/{shipId}` — as 1d |
 
-```bash
-curl --request PUT \
-  --url https://api.bartender-tt.com/logistics/shiporder \
-  --header 'Accept: application/json' \
-  --header "apiKey: $API_KEY" \
-  --header 'x-tenant: TRGDEMO' \
-  --header 'Content-Type: application/json' \
-  --data '{
-  "soId": 8133384547531299,
-  "contentFormat": "tag",
-  "transactionId": "SHIP-TEST5",
-  "creationTime": "2026-10-19T05:20:54.735Z",
-  "expirationTime": null,
-  "lastStatusChange": "2026-10-19T05:20:54.735Z",
-  "source": "urn:mjx:site:loc:TRGDEMO.00006.0",
-  "destination": "urn:mjx:site:loc:TRGDEMO.00007.0",
-  "containers": [
-    { "content": [
-      { "format": "tag", "hexa": "301401D54860AE40000EFEED" }
-    ] }
-  ]
-}'
-```
-
-Keep the returned id → `shipId`.
-
-### 6. Read totes at the shipping dock
-
-Same as step 2 with `"transactionId": "SHIP-TEST5"` (and the shipping zone's `channelId`).
-
-### 7. Compare expected vs. read
-
-```bash
-curl --request GET \
-  --url https://api.bartender-tt.com/logistics/shiporder/compare/{shipId} \
-  --header 'Accept: application/json' \
-  --header "apiKey: $API_KEY" \
-  --header 'x-tenant: TRGDEMO'
-```
-
-**Response `200`** (one tote not read, one stray tote read; lists trimmed):
+### Compare response
 
 ```json
 {
@@ -228,17 +158,82 @@ curl --request GET \
 }
 ```
 
+(One tote not read, one stray tote read; lists trimmed.)
+
 - **Green** = `discrepanciesCount == 0`. `missing` = expected but not read; `notExpected` = read but not on the order.
 - Empty lists come back as `{}` instead of `[]` — handle both.
-- Right after posting reads this can return `404 {"code":"404","message":"No global results for listId … found"}`
-  for a few seconds while reads are processed. Retry every ~3 s.
-- Comparing quantity alone is not enough — a missing tote plus a stray tote still counts 20.
+- Right after posting reads, compare can return `404 {"message":"No global results for listId … found"}` for a few
+  seconds while reads are processed. Retry every ~3 s.
+- Quantity alone is not enough: a missing tote plus a stray tote still counts 20.
 
-### 8. Close the shipping order
+## 3. Store receiving (ASN)
 
-Same as step 4 with `{shipId}`, `"transactionId": "SHIP-TEST5"` and the shipped EPCs in `containers`. Response `204`.
+As soon as the DC shipment is closed, create the ASN at the store with the same EPCs.
 
-### 9. Receive at store — next phase
+```bash
+curl --request PUT --url https://api.bartender-tt.com/logistics/asn \
+  --header "apiKey: $API_KEY" --header 'x-tenant: TRGDEMO' --header 'Content-Type: application/json' \
+  --data '{
+  "asnId": 8133384547531811,
+  "contentFormat": "tag",
+  "transactionId": "RECV-261019203846",
+  "creationTime": "2026-10-19T20:39:10.000Z",
+  "expirationTime": null,
+  "lastStatusChange": "2026-10-19T20:39:10.000Z",
+  "source": "urn:mjx:site:loc:TRGDEMO.00006.0",
+  "destination": "urn:mjx:site:loc:TRGDEMO.00007.0",
+  "containers": [ { "content": [ { "format": "tag", "hexa": "301401D54860AE40000EFEED" } ] } ]
+}'
+```
+
+Response `201`: `8457575565891124` → `asnId`. Then:
+
+| Call | |
+|---|---|
+| Read | `POST /datacollector/reads` — `ST00199_Collector` / `RECV`, `transactionId: "RECV-…"` |
+| Compare | `GET /logistics/asn/compare/{asnId}` — same shape as above |
+| Get | `GET /logistics/asn/{asnId}` |
+| Close | `PUT /logistics/asn/{asnId}` — `status: "done"`, same body as the create minus ids/times, resend `containers` |
+
+## 4. Empty pool (no order)
+
+Pushing the empties through the tunnel is a plain read on the `MOVE_EmptyPool` channel. **No `transactionId`**:
+the channel's workflow (Storing / Stored) moves the totes.
+
+```bash
+curl --request POST --url https://api.bartender-tt.com/datacollector/reads \
+  --header "apiKey: $API_KEY" --header 'x-tenant: TRGDEMO' --header 'Content-Type: application/json' \
+  --data '{
+  "collectorId": "ST00199_Collector",
+  "channelId": "MOVE_EmptyPool",
+  "readTime": "2026-10-19T20:39:40.000Z",
+  "tags": [ { "hexa": "301401D54860AE40000EFEED", "attributes": {} } ]
+}'
+```
+
+Response `200` `{"tagsReceived": 20, "status": "COMMITTED", …}`.
+
+## 5. Store → DC return of the empties
+
+Same as section 2 with source and destination swapped:
+
+| Call | |
+|---|---|
+| Create | `PUT /logistics/shiporder` — `source` = store, `destination` = DC, `contentFormat: "tag"`, `transactionId: "RTN-…"` |
+| Read | `POST /datacollector/reads` — `ST00199_Collector` / `SHIP`, `transactionId: "RTN-…"` |
+| Compare | `GET /logistics/shiporder/compare/{returnId}` |
+| Close | `PUT /logistics/shiporder/{returnId}` |
+
+## 6. DC receiving the empties (ASN)
+
+Same as section 3 with `source` = store, `destination` = DC:
+
+| Call | |
+|---|---|
+| Create | `PUT /logistics/asn` — `transactionId: "DCRECV-…"` |
+| Read | `POST /datacollector/reads` — `DC_Collector` / `RECV`, `transactionId: "DCRECV-…"` |
+| Compare | `GET /logistics/asn/compare/{dcAsnId}` |
+| Close | `PUT /logistics/asn/{dcAsnId}` |
 
 ## Generating tote EPCs (SGTIN-96)
 
@@ -259,9 +254,12 @@ function sgtin96(gtin14, prefixLen, serial, filter = 0) {
 
 ## Gotchas
 
-- Create returns the order id as a bare number; update/close/get/compare use that id, **not** the `soId` you sent.
-- Update is a full replace: `containers: [{}]` (as in the original Postman collection) **wipes the order contents**. Resend them.
-- Reads are cumulative per `transactionId` — once a tag is read against an order it stays read.
-- Compare can 404 for a few seconds after reads; empty lists are `{}`.
+- Create returns a bare-number id; use it (not the `soId`/`asnId` you sent) for everything after.
+- Update is a full replace — resend `containers` or the contents are wiped.
+- Reads add up per `transactionId`; once a tag is read against an order it stays read.
+- Compare can 404 for a few seconds after reads; empty lists come back as `{}`.
+- **Intermittent `401 {"error":"not_owned","message":"unauthorized"}` with a valid key** — about 1 in 3 calls at times.
+  It is rejected in ~2 ms before reaching the service, so the call was not processed and is safe to retry
+  (the demo server retries up to 3×). Reported to the platform team.
 - Postman examples contain `// comments` inside the JSON — strip them; the API needs valid JSON.
-- `transactionId` must be unique per order and identical between the order and its reads.
+- Use a unique `transactionId` per order, identical between the order and its reads.

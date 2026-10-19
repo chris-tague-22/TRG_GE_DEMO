@@ -9,7 +9,7 @@
 <body>
   <header class="top">
     <div>
-      <h1>TRG tote flow: pack → ship</h1>
+      <h1>TRG tote loop: DC → store → empty pool → DC</h1>
       <p class="sub">A step-by-step walkthrough of the BarTender Track &amp; Trace API. Every step shows the exact request, a copyable curl, and the live response.</p>
     </div>
     <div class="top-actions">
@@ -26,28 +26,25 @@
       <div class="grid">
         <label>API key <input data-setting="apiKey" type="password" placeholder="leave blank to use .env"></label>
         <label>Tenant (<code>x-tenant</code>) <input data-setting="tenant"></label>
-        <label>DC (source) <input data-setting="dc"></label>
-        <label>Store A <input data-setting="storeA"></label>
-        <label>Store B <input data-setting="storeB" placeholder="urn:mjx:site:loc:TRGDEMO.0000?.0"></label>
-        <label>Ship to
-          <select data-setting="destination"><option value="storeA">Store A</option><option value="storeB">Store B</option></select>
-        </label>
+        <label>DC (source) — DC00001 <input data-setting="dc"></label>
+        <label>Store (destination) — ST00199 <input data-setting="store"></label>
         <label>Tote SKU (GTIN-14 / <code>pid</code>) <input data-setting="gtin"></label>
         <label>Company prefix length <input data-setting="prefixLen" type="number" min="6" max="12"></label>
         <label>Totes per order <input data-setting="qty" type="number" min="1" max="500"></label>
-        <label>Reader (<code>collectorId</code>) <input data-setting="collectorId"></label>
-        <label>Pack zone channel (<code>channelId</code>) <input data-setting="packChannel"></label>
-        <label>Ship zone channel (<code>channelId</code>) <input data-setting="shipChannel"></label>
+        <label>DC reader (<code>collectorId</code>) <input data-setting="dcCollectorId"></label>
+        <label>DC packing channel <input data-setting="packChannel"></label>
+        <label>DC shipping channel <input data-setting="dcShipChannel"></label>
+        <label>DC receiving channel <input data-setting="dcRecvChannel"></label>
+        <label>Store reader (<code>collectorId</code>) <input data-setting="storeCollectorId"></label>
+        <label>Store receiving channel (floor) <input data-setting="storeRecvChannel"></label>
+        <label>Store empty-pool channel (tunnel) <input data-setting="storePoolChannel"></label>
+        <label>Store shipping channel <input data-setting="storeShipChannel"></label>
       </div>
       <p class="hint" id="run-ids"></p>
     </section>
 
     <div id="steps"></div>
 
-    <section class="card disabled">
-      <h2><span class="num">9</span> Receive at store <span class="tag">coming next</span></h2>
-      <p class="explain">The store reads the totes on arrival and the order is received and closed. This step gets added once the receive calls are confirmed.</p>
-    </section>
   </main>
 
   <footer>Reference for AI tools: <a href="/docs/API-FLOW.md" target="_blank">docs/API-FLOW.md</a></footer>
