@@ -47,7 +47,7 @@ const STEPS = [
       destination: destination(),
       containers: [{ content: [{ format: 'quantity', quantity: Number(settings.qty), pid: settings.gtin }] }],
     }),
-    after: (json) => { run.packId = findOrderId(json) || String(run.packSoId); },
+    after: (json, text) => { run.packId = findOrderId(json, text) || String(run.packSoId); },
   },
   {
     id: 'readPack',
@@ -72,8 +72,9 @@ const STEPS = [
     id: 'closePack',
     title: 'Close the packing order',
     explain:
-      'PUT on the order URL (using the ID the API returned in step 1) with status "done". ' +
-      'contentFormat switches to "tag" because the order is now resolved to actual EPCs.',
+      'PUT on the order URL (the ID returned in step 1) with status "done". contentFormat switches to "tag" and the ' +
+      'packed EPCs are listed, so the order records exactly which totes were packed. ' +
+      'The PUT replaces the whole order — send the contents again or they are wiped.',
     method: 'PUT',
     path: () => `/logistics/shiporder/${run.packId || '{packId}'}`,
     body: () => ({
@@ -82,7 +83,7 @@ const STEPS = [
       status: 'done',
       source: settings.dc,
       destination: destination(),
-      containers: [{}],
+      containers: tagContainers(run.epcs),
     }),
   },
   {
@@ -103,16 +104,17 @@ const STEPS = [
       lastStatusChange: new Date().toISOString(),
       source: settings.dc,
       destination: destination(),
-      containers: [{ content: run.epcs.map((hexa) => ({ format: 'tag', hexa })) }],
+      containers: tagContainers(run.epcs),
     }),
-    after: (json) => { run.shipId = findOrderId(json) || String(run.shipSoId); },
+    after: (json, text) => { run.shipId = findOrderId(json, text) || String(run.shipSoId); },
   },
   {
     id: 'readShip',
     title: 'Read totes at the shipping dock',
     explain:
       'Same data-collector call as step 2, now with the shipping transactionId and the ship zone channel. ' +
-      'Use the buttons to simulate a short or wrong shipment and watch the check in step 7 go red.',
+      'Use the buttons to simulate a short or wrong shipment and watch the check in step 7 go red. ' +
+      'Reads add up — anything already sent stays read, so start a new run to go back to a clean shipment.',
     method: 'POST',
     path: () => '/datacollector/reads',
     extra: 'shipSim',
@@ -122,16 +124,19 @@ const STEPS = [
     id: 'compareShip',
     title: 'Check: expected vs. read',
     explain:
-      'GET the ship order (and its /compare view) to see expected vs. actual. ' +
-      'The lights are computed locally from the EPCs sent in steps 5 and 6.',
+      'The API compares the order\'s expected EPCs with everything read under its transactionId and returns ' +
+      'matching / missing / notExpected. Reads are processed asynchronously, so right after step 6 this can 404 ' +
+      'for a few seconds ("No global results…") — the app retries automatically.',
     method: 'GET',
     path: () => `/logistics/shiporder/compare/${run.shipId || '{shipId}'}`,
     extra: 'lights',
+    retryOn404: true,
+    after: (json) => { run.compare = json; },
   },
   {
     id: 'closeShip',
     title: 'Close the shipping order',
-    explain: 'Mark the shipment done once the dock read matches.',
+    explain: 'Mark the shipment done once the dock read matches. As in step 4, resend the contents with the status change.',
     method: 'PUT',
     path: () => `/logistics/shiporder/${run.shipId || '{shipId}'}`,
     body: () => ({
@@ -140,10 +145,14 @@ const STEPS = [
       status: 'done',
       source: settings.dc,
       destination: destination(),
-      containers: [{}],
+      containers: tagContainers(run.epcs),
     }),
   },
 ];
+
+function tagContainers(epcs) {
+  return [{ content: epcs.map((hexa) => ({ format: 'tag', hexa })) }];
+}
 
 function reads(transactionId, channelId, epcs) {
   return {
@@ -159,8 +168,10 @@ function destination() {
   return settings[settings.destination] || settings.storeA;
 }
 
-// The create call accepts our soId, but the API may assign its own — use whatever comes back.
-function findOrderId(json) {
+// The create call returns the order id the API assigned (a bare number like 8457557468661109),
+// which is NOT the soId we sent. Update/close/get must use the returned id.
+function findOrderId(json, text) {
+  if (/^\s*"?\d+"?\s*$/.test(text || '')) return text.trim().replace(/"/g, ''); // read from text: ids are near the JS number precision limit
   if (!json || typeof json !== 'object') return null;
   for (const obj of [json, json.data, json.shipOrder, json.result]) {
     if (!obj || typeof obj !== 'object') continue;
@@ -210,6 +221,7 @@ function newRun() {
     shipId: null,
     epcs: [],
     shipReads: [],
+    compare: null,
     results: {},
   };
   run = r;
@@ -315,10 +327,11 @@ function renderExtra(step, el) {
           <button class="ghost sim-stray">Add a stray tote</button>
           <span class="hint sim-count"></span>
         </div>`;
-      el.querySelector('.sim-all').addEventListener('click', () => { run.shipReads = [...run.epcs]; refresh(); });
-      el.querySelector('.sim-drop').addEventListener('click', () => { run.shipReads.pop(); refresh(); });
+      el.querySelector('.sim-all').addEventListener('click', () => { run.shipReads = [...run.epcs]; run.compare = null; refresh(); });
+      el.querySelector('.sim-drop').addEventListener('click', () => { run.shipReads.pop(); run.compare = null; refresh(); });
       el.querySelector('.sim-stray').addEventListener('click', () => {
         run.shipReads.push(sgtin96(settings.gtin, Number(settings.prefixLen), Math.floor(Math.random() * 99999999)));
+        run.compare = null;
         refresh();
       });
     }
@@ -326,14 +339,23 @@ function renderExtra(step, el) {
   }
 
   if (step.extra === 'lights') {
+    // Prefer the API's answer (step 7); before that, preview from what was sent in steps 5 and 6.
+    // Note: the API returns an empty list as {} rather than [].
+    const list = (v) => (Array.isArray(v) ? v : []).map((t) => t.hexa || t.epc);
+    const c = run.compare && run.compare.containers ? run.compare : null;
+    const sum = (key) => (c ? c.containers.flatMap((k) => list(k[key])) : null);
     const expected = new Set(run.epcs);
     const read = new Set(run.shipReads);
-    const missing = [...expected].filter((e) => !read.has(e));
-    const unexpected = [...read].filter((e) => !expected.has(e));
+    const missing = c ? sum('missing') : [...expected].filter((e) => !read.has(e));
+    const unexpected = c ? sum('notExpected') : [...read].filter((e) => !expected.has(e));
+    const matched = c ? c.matchCount : [...read].filter((e) => expected.has(e)).length;
+    const readCount = matched + unexpected.length;
+    const expCount = matched + missing.length;
     const light = (ok, label, value) => `<div class="light ${ok ? 'ok' : 'bad'}">${label}<b>${value}</b></div>`;
     el.innerHTML = `
+      <p class="hint">${c ? 'Result from the API compare call.' : 'Preview from the EPCs sent in steps 5–6 — run this step for the API\'s answer.'}</p>
       <div class="lights">
-        ${light(read.size === expected.size, 'Quantity (read / expected)', `${read.size} / ${expected.size}`)}
+        ${light(readCount === expCount, 'Quantity (read / expected)', `${readCount} / ${expCount}`)}
         ${light(missing.length === 0, 'Missing totes', missing.length)}
         ${light(unexpected.length === 0, 'Unexpected totes', unexpected.length)}
         ${light(missing.length === 0 && unexpected.length === 0, 'Shipment', missing.length || unexpected.length ? 'MISMATCH' : 'OK')}
@@ -373,16 +395,23 @@ async function execute(step, card) {
   const started = performance.now();
   let result;
   try {
-    const res = await fetch('/api' + step.path(), {
-      method: step.method,
-      headers: { 'X-Demo-Key': settings.apiKey, 'X-Demo-Tenant': settings.tenant, ...(bodyText ? { 'Content-Type': 'application/json' } : {}) },
-      body: bodyText,
-    });
+    let res;
+    for (let attempt = 1; ; attempt++) {
+      res = await fetch('/api' + step.path(), {
+        method: step.method,
+        headers: { 'X-Demo-Key': settings.apiKey, 'X-Demo-Tenant': settings.tenant, ...(bodyText ? { 'Content-Type': 'application/json' } : {}) },
+        body: bodyText,
+      });
+      if (!(step.retryOn404 && res.status === 404 && attempt < 6)) break;
+      btn.textContent = `Waiting for reads… (${attempt})`;
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    btn.textContent = 'Run';
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch {}
     result = { status: res.status, ms: Math.round(performance.now() - started), text: json ? JSON.stringify(json, null, 2) : text || '(empty body)' };
-    if (res.ok && step.after) step.after(json);
+    if (res.ok && step.after) step.after(json, text);
   } catch (err) {
     result = { status: 0, ms: Math.round(performance.now() - started), text: 'Could not reach the local server: ' + err.message };
   }
